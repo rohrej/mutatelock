@@ -1,4 +1,4 @@
-module mutatelock
+module github.com/rohrej/mutatelock
 
 go 1.22
 
