@@ -360,3 +360,65 @@ func TestUUL_Block_Upgradeable(t *testing.T) {
 	assert.Equal(t, int32(0), i.Load())
 	m.URUnlock()
 }
+
+// TestUpgradeLockDeadlock reproduces the bug:
+// UpgradeLock() waits on readerSem (line 184) but rUnlockSlow() only signals
+// writerSem, so UpgradeLock() deadlocks permanently when any readers are active
+// at the time of the call. The fix is to change &rw.readerSem to &rw.writerSem
+// on that line, matching the behavior of Lock() (line 152).
+func TestUpgradeLockDeadlock(t *testing.T) {
+	var m URWMutex
+
+	const numReaders = 3
+	readerReady := make(chan struct{}, numReaders)
+	readerRelease := make(chan struct{})
+
+	// Acquire several concurrent read locks.
+	for i := 0; i < numReaders; i++ {
+		go func() {
+			m.RLock()
+			readerReady <- struct{}{}
+			<-readerRelease
+			m.RUnlock()
+		}()
+	}
+	for i := 0; i < numReaders; i++ {
+		<-readerReady
+	}
+
+	// Concurrently: acquire the upgradeable lock then upgrade to a write lock.
+	// URLock() succeeds immediately (doesn't block on readers).
+	// UpgradeLock() announces a pending writer and must wait for readers to drain.
+	upgradeDone := make(chan struct{})
+	go func() {
+		m.URLock()
+		m.UpgradeLock()
+		m.URUnlock()
+		close(upgradeDone)
+	}()
+
+	// Wait until UpgradeLock() has announced the pending writer by making
+	// readerCount negative. Only then release the readers.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if m.readerCount.Load() < 0 {
+			break
+		}
+		runtime.Gosched()
+	}
+	if m.readerCount.Load() >= 0 {
+		t.Fatal("timed out waiting for UpgradeLock to announce pending writer")
+	}
+
+	// Release all readers. Each calls RUnlock() → rUnlockSlow() → signals writerSem.
+	// UpgradeLock() is (incorrectly) blocked on readerSem, so it will never wake up.
+	close(readerRelease)
+
+	select {
+	case <-upgradeDone:
+		// Correct: UpgradeLock completed after all readers exited.
+	case <-time.After(time.Second):
+		t.Fatal("UpgradeLock deadlocked: did not unblock after all readers exited " +
+			"(bug: UpgradeLock waits on readerSem but rUnlockSlow signals writerSem)")
+	}
+}
