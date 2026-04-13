@@ -181,7 +181,7 @@ func (rw *URWMutex) UpgradeLock() {
 	r := rw.readerCount.Add(-urwmutexMaxReaders) + urwmutexMaxReaders
 	// Wait for active readers.
 	if r != 0 && rw.readerWait.Add(r) != 0 {
-		semacquireRWMutexR(&rw.readerSem, false, 0)
+		semacquireRWMutexR(&rw.writerSem, false, 0)
 	}
 }
 
